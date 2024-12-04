@@ -33,7 +33,7 @@ from .apply_dof import ApplyDOF
 STD_TIMEOUT = 30
 
 EFD_SERVER_URL = dict(
-    tucson="tts_efd",
+    tucson="tucson_teststand_efd",
     base="base_efd",
     summit="summit_efd",
 )
@@ -164,6 +164,30 @@ class SetDOF(ApplyDOF):
             self.log.warning("No state found.")
             return np.zeros(50)
 
+    async def get_efd_name(self) -> str:
+        """Get the EFD name.
+
+        Returns
+        -------
+        efd_name : `str`
+            EFD name.
+
+        Raises
+        ------
+        RuntimeError
+            Wrong EFd name
+        """
+        site = os.environ.get("LSST_SITE")
+        if site is None or site not in EFD_SERVER_URL:
+            message = (
+                "LSST_SITE environment variable not defined"
+                if site is None
+                else (f"No image server url for {site=}.")
+            )
+            raise RuntimeError("Wrong EFD name: " + message)
+        else:
+            return EFD_SERVER_URL[site]
+
     async def run(self) -> None:
         """Run script.
 
@@ -176,17 +200,8 @@ class SetDOF(ApplyDOF):
         await self.assert_feasibility()
 
         if self.day is not None and self.seq is not None:
-            site = os.environ.get("LSST_SITE")
-            if site is None or site not in EFD_SERVER_URL:
-                message = (
-                    "LSST_SITE environment variable not defined"
-                    if site is None
-                    else (f"No image server url for {site=}.")
-                )
-                raise RuntimeError("Unable to connect to EFD: " + message)
-            else:
-                client = EfdClient(EFD_SERVER_URL[site])
-
+            efd_name = await self.get_efd_name()
+            client = EfdClient(efd_name)
             image_end_time = self.get_image_time(client, self.day, self.seq)
             self.dofs = self.get_last_issued_state(client, image_end_time)
 
