@@ -21,6 +21,8 @@
 
 __all__ = ["SetDOF"]
 
+import os
+
 import numpy as np
 import yaml
 from astropy.time import Time, TimeDelta
@@ -29,6 +31,12 @@ from lsst_efd_client import EfdClient
 from .apply_dof import ApplyDOF
 
 STD_TIMEOUT = 30
+
+EFD_SERVER_URL = dict(
+    tucson="tts_efd",
+    base="base_efd",
+    summit="summit_efd",
+)
 
 
 class SetDOF(ApplyDOF):
@@ -107,20 +115,26 @@ class SetDOF(ApplyDOF):
 
         Returns
         -------
-        image_time : `datetime.datetime`
-            Image time.
+        end_time : `astropy.time.Time`
+            End time of the image.
+
+        Raises
+        ------
+        RuntimeError
+            Error querying time for image {day}:{seq}.
         """
+        try:
+            query = f"""
+                SELECT  "imageDate", "imageNumber"
+                FROM "efd"."autogen"."lsst.sal.CCCamera.logevent_endReadout"
+                WHERE imageDate =~ /{day}/ AND imageNumber = {seq}
+            """
+            end_time = await self.client.influx_client.query(query)
+            return Time(end_time.iloc[0].name)
+        except Exception:
+            raise RuntimeError(f"Error querying time for image {day}:{seq}.")
 
-        query = f"""
-            SELECT  "imageDate", "imageNumber"
-            FROM "efd"."autogen"."lsst.sal.CCCamera.logevent_endReadout"
-            WHERE imageDate =~ /{day}/ AND imageNumber = {seq}
-        """
-
-        time = await self.client.influx_client.query(query)
-        return Time(time.iloc[0].name)
-
-    async def get_last_issued_state(self, time):
+    async def get_last_issued_state(self, end_time):
         """Get the state from the given day and sequence number.
 
         Parameters
@@ -135,42 +149,46 @@ class SetDOF(ApplyDOF):
         """
 
         topics = [f"aggregatedDoF{i}" for i in range(50)]
-
-        current_end = time
         lookback_interval = TimeDelta(1, format="jd")
-        max_lookback_days = 7
+        state = await self.client.select_time_series(
+            "lsst.sal.MTAOS.logevent_degreeOfFreedom",
+            topics,
+            end_time - lookback_interval,
+            end_time,
+        )
 
-        while True:
-            current_start = current_end - lookback_interval
-
-            state = await self.client.select_time_series(
-                "lsst.sal.MTAOS.logevent_degreeOfFreedom",
-                topics,
-                current_start,
-                current_end,
-            )
-
-            if not state.empty:
-                state = state.iloc[[-1]]
-                return state.values.squeeze()
-
-            current_end = current_start
-            if (time - current_end).jd > max_lookback_days:
-                self.log.info(
-                    "No data found within the specified range and maximum lookback period."
-                )
-                return np.zeros(50)
-        return state.values.squeeze()
+        if not state.empty:
+            state = state.iloc[[-1]]
+            return state.values.squeeze()
+        else:
+            self.log.warning("No state found.")
+            return np.zeros(50)
 
     async def run(self) -> None:
-        """Run script."""
+        """Run script.
+
+        Raises
+        ------
+        RuntimeError
+            Unable to connect to EFD.
+        """
         # Assert feasibility
         await self.assert_feasibility()
 
         if self.day is not None and self.seq is not None:
-            self.client = EfdClient("summit_efd")
-            image_end_time = self.get_image_time(self.day, self.seq)
-            self.dofs = self.get_last_issued_state(image_end_time)
+            site = os.environ.get("LSST_SITE")
+            if site is None or site not in EFD_SERVER_URL:
+                message = (
+                    "LSST_SITE environment variable not defined"
+                    if site is None
+                    else (f"No image server url for {site=}.")
+                )
+                raise RuntimeError("Unable to connect to EFD: " + message)
+            else:
+                self.client = EfdClient(EFD_SERVER_URL[site])
+
+            image_end_time, image_start_time = self.get_image_time(self.day, self.seq)
+            self.dofs = self.get_last_issued_state(image_end_time, image_start_time)
 
         await self.checkpoint("Setting DOF...")
         current_dof = await self.mtcs.rem.mtaos.evt_degreeOfFreedom.aget(
