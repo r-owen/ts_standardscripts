@@ -21,6 +21,11 @@
 
 __all__ = ["SetDOF"]
 
+import numpy as np
+import yaml
+from astropy.time import Time, TimeDelta
+from lsst_efd_client import EfdClient
+
 from .apply_dof import ApplyDOF
 
 STD_TIMEOUT = 30
@@ -42,10 +47,130 @@ class SetDOF(ApplyDOF):
 
     """
 
+    @classmethod
+    def get_schema(cls):
+        schema_yaml = """
+            $schema: http://json-schema.org/draft-07/schema#
+            $id: https://github.com/lsst-ts/ts_standardscripts/maintel/SetDOF.yaml
+            title: SetDOF v1
+            description: Configuration for SetDOF.
+            type: object
+            properties:
+              day:
+                description: Day obs to be used for synchronizing the state.
+                type: number
+                default: null
+              seq:
+                description: Sequence number to be used for synchronizing the state.
+                type: number
+                default: null
+            anyOf:
+                - required:
+                    - day
+                    - seq
+                - required:
+                    - dofs
+            additionalProperties: false
+        """
+        schema_dict = yaml.safe_load(schema_yaml)
+
+        base_schema_dict = super(ApplyDOF, cls).get_schema()
+
+        for prop in base_schema_dict["properties"]:
+            schema_dict["properties"][prop] = base_schema_dict["properties"][prop]
+
+        return schema_dict
+
+    async def configure(self, config) -> None:
+        """Configure script.
+
+        Parameters
+        ----------
+        config : `types.SimpleNamespace`
+            Script configuration, as defined by `schema`.
+        """
+        super(ApplyDOF, self).configure(config)
+
+        if hasattr(config, "day") and hasattr(config, "seq"):
+            self.day = config.day
+            self.seq = config.seq
+
+    async def get_image_time(self, day, seq):
+        """Get the image time from the given day and sequence number.
+
+        Parameters
+        ----------
+        day : `int`
+            Day obs to be used for synchronizing the state.
+        seq : `int`
+            Sequence number to be used for synchronizing the state.
+
+        Returns
+        -------
+        image_time : `datetime.datetime`
+            Image time.
+        """
+
+        query = f"""
+            SELECT  "imageDate", "imageNumber"
+            FROM "efd"."autogen"."lsst.sal.CCCamera.logevent_endReadout"
+            WHERE imageDate =~ /{day}/ AND imageNumber = {seq}
+        """
+
+        time = await self.client.influx_client.query(query)
+        return Time(time.iloc[0].name)
+
+    async def get_last_issued_state(self, time):
+        """Get the state from the given day and sequence number.
+
+        Parameters
+        ----------
+        time : `datetime.datetime`
+            Initial time to query.
+
+        Returns
+        -------
+        state : `dict`
+            State of the system.
+        """
+
+        topics = [f"aggregatedDoF{i}" for i in range(50)]
+
+        current_end = time
+        lookback_interval = TimeDelta(1, format="jd")
+        max_lookback_days = 7
+
+        while True:
+            current_start = current_end - lookback_interval
+
+            state = await self.client.select_time_series(
+                "lsst.sal.MTAOS.logevent_degreeOfFreedom",
+                topics,
+                current_start,
+                current_end,
+            )
+
+            if not state.empty:
+                state = state.iloc[[-1]]
+                return state.values.squeeze()
+
+            current_end = current_start
+            if (time - current_end).jd > max_lookback_days:
+                self.log.info(
+                    "No data found within the specified range and maximum lookback period."
+                )
+                return np.zeros(50)
+        return state.values.squeeze()
+
     async def run(self) -> None:
         """Run script."""
         # Assert feasibility
         await self.assert_feasibility()
+
+        if self.day is not None and self.seq is not None:
+            self.client = EfdClient("summit_efd")
+            image_end_time = self.get_image_time(self.day, self.seq)
+            self.dofs = self.get_last_issued_state(image_end_time)
 
         await self.checkpoint("Setting DOF...")
         current_dof = await self.mtcs.rem.mtaos.evt_degreeOfFreedom.aget(
