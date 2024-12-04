@@ -103,7 +103,7 @@ class SetDOF(ApplyDOF):
             self.day = config.day
             self.seq = config.seq
 
-    async def get_image_time(self, day, seq):
+    async def get_image_time(self, client, day, seq):
         """Get the image time from the given day and sequence number.
 
         Parameters
@@ -129,12 +129,12 @@ class SetDOF(ApplyDOF):
                 FROM "efd"."autogen"."lsst.sal.CCCamera.logevent_endReadout"
                 WHERE imageDate =~ /{day}/ AND imageNumber = {seq}
             """
-            end_time = await self.client.influx_client.query(query)
+            end_time = await client.influx_client.query(query)
             return Time(end_time.iloc[0].name)
         except Exception:
             raise RuntimeError(f"Error querying time for image {day}:{seq}.")
 
-    async def get_last_issued_state(self, end_time):
+    async def get_last_issued_state(self, client, end_time):
         """Get the state from the given day and sequence number.
 
         Parameters
@@ -150,7 +150,7 @@ class SetDOF(ApplyDOF):
 
         topics = [f"aggregatedDoF{i}" for i in range(50)]
         lookback_interval = TimeDelta(1, format="jd")
-        state = await self.client.select_time_series(
+        state = await client.select_time_series(
             "lsst.sal.MTAOS.logevent_degreeOfFreedom",
             topics,
             end_time - lookback_interval,
@@ -185,10 +185,10 @@ class SetDOF(ApplyDOF):
                 )
                 raise RuntimeError("Unable to connect to EFD: " + message)
             else:
-                self.client = EfdClient(EFD_SERVER_URL[site])
+                client = EfdClient(EFD_SERVER_URL[site])
 
-            image_end_time, image_start_time = self.get_image_time(self.day, self.seq)
-            self.dofs = self.get_last_issued_state(image_end_time, image_start_time)
+            image_end_time = self.get_image_time(client, self.day, self.seq)
+            self.dofs = self.get_last_issued_state(client, image_end_time)
 
         await self.checkpoint("Setting DOF...")
         current_dof = await self.mtcs.rem.mtaos.evt_degreeOfFreedom.aget(
