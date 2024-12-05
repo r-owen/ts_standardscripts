@@ -56,7 +56,7 @@ class SetDOF(ApplyDOF):
     """
 
     def __init__(self, index):
-        super().__init__(index=index, descr="Set DOF absolute state")
+        super().__init__(index=index)
 
     @classmethod
     def get_schema(cls):
@@ -145,8 +145,7 @@ class SetDOF(ApplyDOF):
             State of the system.
         """
 
-        efd_name = await self.get_efd_name()
-        client = EfdClient(efd_name)
+        client = await self.get_efd_client()
         end_time = self.get_image_time(client, self.day, self.seq)
 
         topics = [f"aggregatedDoF{i}" for i in range(50)]
@@ -165,13 +164,13 @@ class SetDOF(ApplyDOF):
             self.log.warning("No state found.")
             return np.zeros(50)
 
-    async def get_efd_name(self) -> str:
+    async def get_efd_client(self) -> str:
         """Get the EFD name.
 
         Returns
         -------
-        efd_name : `str`
-            EFD name.
+        EfdClient
+            Client instance to query the EFD.
 
         Raises
         ------
@@ -187,7 +186,7 @@ class SetDOF(ApplyDOF):
             )
             raise RuntimeError("Wrong EFD name: " + message)
         else:
-            return EFD_NAMES[site]
+            return EfdClient(EFD_NAMES[site])
 
     async def run(self) -> None:
         """Run script.
