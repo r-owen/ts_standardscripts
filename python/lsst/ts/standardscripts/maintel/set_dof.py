@@ -32,7 +32,7 @@ from .apply_dof import ApplyDOF
 
 STD_TIMEOUT = 30
 
-EFD_SERVER_URL = dict(
+EFD_NAMES = dict(
     tucson="tucson_teststand_efd",
     base="base_efd",
     summit="summit_efd",
@@ -99,9 +99,8 @@ class SetDOF(ApplyDOF):
         """
         super(ApplyDOF, self).configure(config)
 
-        if hasattr(config, "day") and hasattr(config, "seq"):
-            self.day = config.day
-            self.seq = config.seq
+        self.day = getattr(config, "day", None)
+        self.seq = getattr(config, "seq", None)
 
     async def get_image_time(self, client, day, seq):
         """Get the image time from the given day and sequence number.
@@ -134,19 +133,18 @@ class SetDOF(ApplyDOF):
         except Exception:
             raise RuntimeError(f"Error querying time for image {day}:{seq}.")
 
-    async def get_last_issued_state(self, client, end_time):
+    async def get_last_issued_state(self):
         """Get the state from the given day and sequence number.
-
-        Parameters
-        ----------
-        time : `datetime.datetime`
-            Initial time to query.
 
         Returns
         -------
         state : `dict`
             State of the system.
         """
+
+        efd_name = await self.get_efd_name()
+        client = EfdClient(efd_name)
+        end_time = self.get_image_time(client, self.day, self.seq)
 
         topics = [f"aggregatedDoF{i}" for i in range(50)]
         lookback_interval = TimeDelta(1, format="jd")
@@ -178,7 +176,7 @@ class SetDOF(ApplyDOF):
             Wrong EFd name
         """
         site = os.environ.get("LSST_SITE")
-        if site is None or site not in EFD_SERVER_URL:
+        if site is None or site not in EFD_NAMES:
             message = (
                 "LSST_SITE environment variable not defined"
                 if site is None
@@ -186,7 +184,7 @@ class SetDOF(ApplyDOF):
             )
             raise RuntimeError("Wrong EFD name: " + message)
         else:
-            return EFD_SERVER_URL[site]
+            return EFD_NAMES[site]
 
     async def run(self) -> None:
         """Run script.
@@ -200,10 +198,7 @@ class SetDOF(ApplyDOF):
         await self.assert_feasibility()
 
         if self.day is not None and self.seq is not None:
-            efd_name = await self.get_efd_name()
-            client = EfdClient(efd_name)
-            image_end_time = self.get_image_time(client, self.day, self.seq)
-            self.dofs = self.get_last_issued_state(client, image_end_time)
+            self.dofs = await self.get_last_issued_state()
 
         await self.checkpoint("Setting DOF...")
         current_dof = await self.mtcs.rem.mtaos.evt_degreeOfFreedom.aget(
