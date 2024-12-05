@@ -55,6 +55,9 @@ class SetDOF(ApplyDOF):
 
     """
 
+    def __init__(self, index):
+        super().__init__(index=index, descr="Set DOF absolute state")
+
     @classmethod
     def get_schema(cls):
         schema_yaml = """
